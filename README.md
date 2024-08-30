@@ -51,9 +51,9 @@ python train.py
 
 #### Model Zoo
 
-| dataset    | fold | model | vit backbone | text encoder  | performance | url                                                 |
-| ---------- | ---- | ----- | ------------ | ------------- | ----------- | --------------------------------------------------- |
-| HAKE-train | 0    | LgAR  | ViT-B/32     | CLIP ViT-B/32 |             | [download](https://drive.google.com/file/d/1y4z4_yN |
+| dataset    | model | vit backbone | text encoder  | performance | url  |
+| ---------- | ----- | ------------ | ------------- | ----------- | ---- |
+| HAKE-train | LgAR  | ViT-B/32     | CLIP ViT-B/32 |             |      |
 
 If you find this repo useful, please cite [link]([Yangless/Language-driven-Action-Recognition: Language-driven Action Recognition (github.com)](https://github.com/Yangless/Language-driven-Action-Recognition)).
 
