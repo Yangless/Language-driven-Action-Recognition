@@ -53,7 +53,7 @@ python train.py
 
 | dataset    | model | vit backbone | text encoder  | performance | url  |
 | ---------- | ----- | ------------ | ------------- | ----------- | ---- |
-| HAKE-train | LgAR  | ViT-B/32     | CLIP ViT-B/32 |             |      |
+| HAKE-train | LgAR  | ViT-B/16     | CLIP ViT-B/16 |             |      |
 
 If you find this repo useful, please cite [link]([Yangless/Language-driven-Action-Recognition: Language-driven Action Recognition (github.com)](https://github.com/Yangless/Language-driven-Action-Recognition)).
 
