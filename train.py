@@ -31,12 +31,12 @@ def get_args_parser():
     parser.add_argument('--clip_backbone_pretrained', default="pretrained/clip/ViT-B-16.new.pt", type=str)
     parser.add_argument('--backbone_freeze_layer', default=12, type=int)
 
-    parser.add_argument('--lr', default=1e-3, type=float)
-    parser.add_argument('--weight_decay', default=1e-5, type=float)
+    parser.add_argument('--lr', default=1e-2, type=float)   #default=1e-3
+    parser.add_argument('--weight_decay', default=1e-4, type=float)  #default=1e-5
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--epochs', default=50, type=int)
-    parser.add_argument('--resume', default='runs/train/exp18/checkpoint_epoch_1.pth', help='resume from checkpoint')
+    parser.add_argument('--resume', default='runs/train/exp15/checkpoint_epoch_12_avgloss_1102.0246.pth', help='resume from checkpoint')
     parser.add_argument('--eval', default=False, action='store_true')
     parser.add_argument('--vis_test', default=False, action='store_true')
 
@@ -125,12 +125,16 @@ class ProjectReadout(nn.Module):
 
     def forward(self, x):
         readout = x[:, 0].unsqueeze(1).expand_as(x[:, self.start_index:])
-        features = torch.cat((x[:, self.start_index:], readout), dim=-1)
 
+        #print("(x[:, self.start_index:]).shape",(x[:, self.start_index:]).shape)
+        features = torch.cat((x[:, self.start_index:], readout), dim=-1)
         return self.project(features)
 
 
-class ViT(VisionTransformer):
+from transformers import CLIPModel, CLIPVisionConfig
+import torch.nn as nn
+
+class ViT_Origin(VisionTransformer):
     def __init__(self, img_size=384, patch_size=16, in_chans=3, num_classes=1000,
                  embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
                  qk_scale=None, drop_rate=0, attn_drop_rate=0, drop_path_rate=0,
@@ -264,7 +268,7 @@ class ViT(VisionTransformer):
             x = blk(x)
             if index in [5, 11, 17, 23]:
                 outputs.append(x)
-
+        print("outputs",outputs[0].shape)
         layer_1 = self.act_postprocess1[0:2](outputs[0])
         layer_2 = self.act_postprocess2[0:2](outputs[1])
         layer_3 = self.act_postprocess3[0:2](outputs[2])
@@ -285,6 +289,160 @@ class ViT(VisionTransformer):
         layer_4 = self.act_postprocess4[3:](layer_4)   #2
 
         return layer_1, layer_2, layer_3, layer_4
+
+
+from transformers import CLIPVisionModel
+import torch.nn.functional as F
+import torch.nn as nn
+import math
+
+class ViT(VisionTransformer):
+    def __init__(self, img_size=384, patch_size=16, in_chans=3, num_classes=1000,
+                 embed_dim=1024, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+                 qk_scale=None, drop_rate=0, attn_drop_rate=0, drop_path_rate=0,
+                 norm_layer=nn.LayerNorm, **kwargs):
+        super(ViT, self).__init__()
+
+        config = CLIPVisionConfig(
+            image_size=384,  # 图像大小
+            patch_size=16,  # 图像块大小
+            num_channels=3,  # 图像通道数
+            hidden_size=1024,  # 嵌入维度
+            num_hidden_layers=12,  # 隐藏层数量
+            num_attention_heads=12,  # 注意力头数量
+            intermediate_size=1024 * 4,  # 中间层大小，通常是 embed_dim * mlp_ratio
+            hidden_act="gelu",  # 激活函数
+            hidden_dropout_prob=0.0,  # 隐藏层 dropout 概率
+            attention_probs_dropout_prob=0.0,  # 注意力 dropout 概率
+            initializer_range=0.02,  # 初始化范围
+            layer_norm_eps=1e-5,  # 层归一化 epsilon
+            qkv_bias=True,  # 是否使用 qkv 偏置
+            use_cache=True,  # 是否使用缓存
+        )
+        # 加载预训练的clip-vit-base-patch16模型
+        self.clip_vit = CLIPVisionModel.from_pretrained('./clip-vit-base-patch16')
+
+        self.patch_size = patch_size
+        self.start_index = 1
+        features = [256, 512, 1024, 1024]  # 特征通道数与原始模型保持一致
+        self.dropout = nn.Dropout(p=drop_rate)  # 添加dropout层
+        # 处理每个特征层的输出
+        readout_oper = [
+            ProjectReadout(embed_dim, self.start_index) for _ in features
+        ]
+
+        self.act_postprocess1 = nn.Sequential(
+            readout_oper[0],
+            Transpose(1, 2),
+            Unflatten(2, [img_size // 16, img_size // 16]),
+            nn.Conv2d(in_channels=embed_dim, out_channels=features[0], kernel_size=1),
+            nn.ConvTranspose2d(in_channels=features[0], out_channels=features[0], kernel_size=4, stride=4)
+        )
+
+        self.act_postprocess2 = nn.Sequential(
+            readout_oper[1],
+            Transpose(1, 2),
+            Unflatten(2, [img_size // 16, img_size // 16]),
+            nn.Conv2d(in_channels=embed_dim, out_channels=features[1], kernel_size=1),
+            nn.ConvTranspose2d(in_channels=features[1], out_channels=features[1], kernel_size=2, stride=2)
+        )
+
+        self.act_postprocess3 = nn.Sequential(
+            readout_oper[2],
+            Transpose(1, 2),
+            Unflatten(2, [img_size // 16, img_size // 16]),
+            nn.Conv2d(in_channels=embed_dim, out_channels=features[2], kernel_size=1)
+        )
+
+        self.act_postprocess4 = nn.Sequential(
+            readout_oper[3],
+            Transpose(1, 2),
+            Unflatten(2, [img_size // 16, img_size // 16]),
+            nn.Conv2d(in_channels=embed_dim, out_channels=features[3], kernel_size=1),
+            nn.Conv2d(in_channels=features[3], out_channels=features[3], kernel_size=3, stride=2, padding=1)
+        )
+
+        self.norm = nn.Identity()
+        self.head = nn.Identity()
+        self.linear_layer = nn.Linear(768, 1024).to("cuda")
+
+    def _resize_pos_embed(self, posemb, gs_h, gs_w):
+        # CLIP 的位置嵌入是 nn.Embedding，需要转换为权重张量
+        posemb_weights = posemb.weight  # 提取 nn.Embedding 中的权重
+
+        # 从位置嵌入中分离 CLS token 和网格嵌入
+        posemb_tok, posemb_grid = (
+            posemb_weights[:self.start_index],
+            posemb_weights[self.start_index:],
+        )
+
+        gs_old = int(math.sqrt(len(posemb_grid)))
+
+        # 调整网格嵌入的形状并插值到新的网格大小
+        posemb_grid = posemb_grid.reshape(1, gs_old, gs_old, -1).permute(0, 3, 1, 2)
+        posemb_grid = F.interpolate(posemb_grid, size=(gs_h, gs_w), mode="bilinear")
+        posemb_grid = posemb_grid.permute(0, 2, 3, 1).reshape(1, gs_h * gs_w, -1)
+
+        # 重新组合 CLS token 和插值后的网格嵌入
+        posemb = torch.cat([posemb_tok.unsqueeze(0), posemb_grid], dim=1)
+
+        return posemb
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        # 正确获取 CLIP 模型的位置信息嵌入
+        pos_embed = self._resize_pos_embed(
+            self.clip_vit.vision_model.embeddings.position_embedding,  # 修正访问路径
+            h // self.patch_size, w // self.patch_size
+        )
+
+        # 获取 patch 嵌入，使用 CLIP 的 patch_embedding 层代替
+        x = self.clip_vit.vision_model.embeddings.patch_embedding(x).flatten(2).permute(0, 2, 1)
+
+        cls_tokens = self.clip_vit.vision_model.embeddings.class_embedding
+        cls_tokens = cls_tokens.unsqueeze(0).repeat(b, 1, 1)
+        x = torch.cat((cls_tokens, x), dim=1)
+
+        x = x + pos_embed
+        x = self.dropout(x)
+
+        outputs = []
+
+        #         for index, blk in enumerate(self.blocks):
+        #             x = blk(x)
+        #             if index in [5, 11, 17, 23]:
+        #                 outputs.append(x)
+
+
+
+        for index, blk in enumerate(self.blocks):
+            x = blk(x)
+            if index in [3, 6, 9, 11]:  # 提取不同层的输出3, 6, 9, 11
+                outputs.append(x)
+        # 应用全连接层
+        outputs[0] = self.linear_layer(outputs[0])
+        outputs[1] = self.linear_layer(outputs[1])
+        outputs[2] = self.linear_layer(outputs[2])
+        outputs[3] = self.linear_layer(outputs[3])
+        layer_1 = self.act_postprocess1[0:2](outputs[0])
+        layer_2 = self.act_postprocess2[0:2](outputs[1])
+        layer_3 = self.act_postprocess3[0:2](outputs[2])
+        layer_4 = self.act_postprocess4[0:2](outputs[3])
+
+        shape = (-1, 1024, h // self.patch_size, w // self.patch_size)
+        layer_1 = layer_1.view(shape)
+        layer_2 = layer_2.view(shape)
+        layer_3 = layer_3.view(shape)
+        layer_4 = layer_4.view(shape)
+
+        layer_1 = self.act_postprocess1[3:](layer_1)
+        layer_2 = self.act_postprocess2[3:](layer_2)
+        layer_3 = self.act_postprocess3[3:](layer_3)
+        layer_4 = self.act_postprocess4[3:](layer_4)
+
+        return layer_1, layer_2, layer_3, layer_4
+
 import torch
 import torch.nn as nn
 from transformers import CLIPTextModel, CLIPTokenizer
@@ -309,7 +467,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 import torch
 import torch.nn as nn
 from transformers import CLIPTextModel, CLIPConfig
-
+from transformers import CLIPModel, CLIPConfig
 
 class CLIPText(nn.Module):
     def __init__(
@@ -345,10 +503,41 @@ class CLIPText(nn.Module):
 
         # Instantiate text model with custom configuration
         self.text_model = CLIPTextModel(config)
-
+        self.text_model = CLIPTextModel.from_pretrained("./clip-vit-base-patch16")
         # Projection layer
         self.text_projection = nn.Parameter(torch.randn(text_embed_dim, projection_dim))
 
+
+# class CLIPText(nn.Module):
+#     def __init__(
+#             self,
+#             local_weights_path: str = "pretrained/ViT-B-16.new.pt",
+#             max_text_length: int = 77,
+#             text_embed_dim: int = 512,
+#             projection_dim: int = 512):
+#         super().__init__()
+#
+#         # Manually define the CLIP configuration
+#         config = CLIPConfig(
+#             hidden_size=768,  # Corresponds to the hidden size of ViT-B/16
+#             num_attention_heads=12,  # Number of heads in ViT-B/16
+#             num_hidden_layers=12,  # Number of transformer layers in ViT-B/16
+#             intermediate_size=3072,  # Intermediate size for MLP layers
+#             projection_dim=512,  # Projection dimension used by CLIP
+#             max_position_embeddings=197,  # 196 patches + 1 CLS token for ViT-B/16
+#             vocab_size=49408  # Text model's vocabulary size
+#         )
+#
+#         # Initialize the CLIP model without downloading weights
+#         self.clip_model = CLIPModel(config)
+#
+#         # Load the local ViT weights into the vision model
+#         state_dict = torch.load(local_weights_path)
+#         self.clip_model.load_state_dict(state_dict)
+#
+#         # Extract text and vision models from the loaded CLIP model
+#         self.text_model = self.clip_model.text_model
+#         self.text_projection = nn.Parameter(torch.randn(text_embed_dim, projection_dim))
 
 
     def get_text_features(
@@ -768,8 +957,9 @@ def load_checkpoint(checkpoint_path, model, optimizer, lr_scheduler):
         print(checkpoint_path)
         checkpoint = torch.load(checkpoint_path)
         model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+        # bug fix, Prevent overwriting lr...
+        # optimizer.load_state_dict(checkpoint['optimizer'])
+        # lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
         start_epoch = checkpoint['epoch'] + 1
         args = checkpoint['args']
         print(f'Checkpoint loaded: {checkpoint_path}')
@@ -784,6 +974,12 @@ def train(model, dataloader, criterion, optimizer, args):
     if  not args.resume:
         checkpoint_path = args.resume
         args.start_epoch, args = load_checkpoint(checkpoint_path, model, optimizer, lr_scheduler)
+        print(f"Resuming training from checkpoint: {checkpoint_path}")
+        print(f"Starting from epoch: {args.start_epoch}")
+    # Output information about the optimizer, lr_scheduler, and loaded model
+    print("Optimizer details:", optimizer)
+    #print("Learning Rate Scheduler details:", lr_scheduler)
+    #print("Model loaded:", model)
 
 
 
